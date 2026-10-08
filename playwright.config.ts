@@ -3,6 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import { ENV } from './src/utils/env';
 
+// Disable terminal title updates to prevent stdout corruption
+process.env.PLAYWRIGHT_DISABLE_TERMINAL_TITLE = '1';
 
 // ── Dynamic Auth State Detection ──────────────────────────────────
 // Automatically detect if an environment-specific saved session exists:
@@ -46,7 +48,7 @@ export default defineConfig({
 
 
   // Reporter configuration
-  reporter: process.env.CI
+  reporter: process.env.GITHUB_ACTIONS
     ? [
         ['html', { open: 'never', outputFolder: 'playwright-report' }],
         ['json', { outputFile: 'test-results/results.json' }],
@@ -55,7 +57,7 @@ export default defineConfig({
     : [
         ['html', { open: 'on-failure', outputFolder: 'playwright-report' }],
         ['json', { outputFile: 'test-results/results.json' }],
-        ['list'],
+        ['dot'],
         ['allure-playwright', { outputFolder: 'allure-results' }],
       ],
 
