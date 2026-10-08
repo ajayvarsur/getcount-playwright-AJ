@@ -1,0 +1,289 @@
+name: COUNT Playwright Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Nightly smoke tests at 02:00 UTC (Monday to Friday)
+    - cron: '0 2 * * 1-5'
+    # Weekly full regression tests on Sunday at 03:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target Environment (dev or prod)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      browser:
+        description: 'Browser to Test'
+        required: true
+        default: 'chromium'
+        type: choice
+        options:
+          - chromium
+          - firefox
+          - webkit
+          - all
+      suite:
+        description: 'Test Suite to Run'
+        required: true
+        default: 'smoke'
+        type: choice
+        options:
+          - smoke
+          - regression
+          - e2e
+          - reports
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: true
+  # Target environment: defaults to 'dev' for push/PR/nightly, or selection from workflow_dispatch
+  TEST_ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  test:
+    name: 'Playwright Tests'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ github.event.inputs.browser == 'all' && fromJson('["chromium", "firefox", "webkit"]') || fromJson(format('["{0}"]', github.event.inputs.browser || 'chromium')) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Linter & Type Check
+        run: |
+          npm run lint
+          npx tsc --noEmit
+
+      # ── Generate .env file from GitHub Secrets ─────────────────────
+      # env.ts uses dotenv to load .env.dev or .env.prod, so we must create it.
+      # This step dynamically writes the correct env file for the target environment.
+      - name: Generate environment file
+        run: |
+          ENV_FILE=".env.$TEST_ENV"
+          echo "Generating $ENV_FILE for [$TEST_ENV] environment..."
+
+          if [ "$TEST_ENV" = "prod" ]; then
+            cat > "$ENV_FILE" <<EOF
+          BASE_URL=https://app.getcount.com
+          WORKSPACE_NAME=Playwright AJ PRO
+          PROD_ADMIN_EMAIL=${{ secrets.PROD_ADMIN_EMAIL }}
+          PROD_ADMIN_PASSWORD=${{ secrets.PROD_ADMIN_PASSWORD }}
+          CI=true
+          HEADLESS=true
+          RETRIES=2
+          WORKERS=1
+          EOF
+          else
+            cat > "$ENV_FILE" <<EOF
+          BASE_URL=https://dev-app.getcount.com
+          WORKSPACE_NAME=Playwright AJ
+          DEV_ADMIN_EMAIL=${{ secrets.DEV_ADMIN_EMAIL }}
+          DEV_ADMIN_PASSWORD=${{ secrets.DEV_ADMIN_PASSWORD }}
+          CI=true
+          HEADLESS=true
+          RETRIES=0
+          WORKERS=1
+          EOF
+          fi
+
+          echo "✅ $ENV_FILE created successfully"
+          # Safety check: ensure credentials were injected (without printing them)
+          if grep -q "ADMIN_EMAIL=$" "$ENV_FILE"; then
+            echo "::warning::Credential secret appears to be empty. Check your GitHub Actions secrets."
+          fi
+
+      # ── Auth Session Restoration (for 2FA/OTP accounts) ────────────
+      # Supports both compressed base64 string (to fit GitHub 48KB secret limit) and raw JSON
+      - name: Restore Auth Session from Secrets (if provided)
+        env:
+          DEV_STORAGE_STATE: ${{ secrets.DEV_STORAGE_STATE }}
+          PROD_STORAGE_STATE: ${{ secrets.PROD_STORAGE_STATE }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const zlib = require("zlib");
+            const env = process.env.TEST_ENV;
+            const secret = (env === "prod" ? process.env.PROD_STORAGE_STATE : process.env.DEV_STORAGE_STATE) || "";
+            if (!secret.trim()) {
+              console.log(`No direct storage-state secret configured for [${env}]. Checking action cache...`);
+              process.exit(0);
+            }
+            const target = `storage-state.${env}.json`;
+            const trimmed = secret.trim();
+            if (trimmed.startsWith("{")) {
+              fs.writeFileSync(target, trimmed, "utf8");
+              console.log(`✅ Restored ${target} from raw JSON secret.`);
+            } else {
+              try {
+                const buf = Buffer.from(trimmed, "base64");
+                if (buf[0] === 0x1f && buf[1] === 0x8b) {
+                  fs.writeFileSync(target, zlib.gunzipSync(buf));
+                  console.log(`✅ Restored ${target} from compressed base64 secret.`);
+                } else {
+                  fs.writeFileSync(target, buf.toString("utf8"));
+                  console.log(`✅ Restored ${target} from base64 secret.`);
+                }
+              } catch (err) {
+                console.error(`⚠️ Could not decode secret as base64, writing as raw: ${err.message}`);
+                fs.writeFileSync(target, trimmed, "utf8");
+              }
+            }
+          '
+
+      - name: Cache Auth Storage State
+        uses: actions/cache@v4
+        with:
+          path: storage-state.${{ env.TEST_ENV }}.json
+          key: auth-state-${{ env.TEST_ENV }}-${{ github.run_id }}
+          restore-keys: |
+            auth-state-${{ env.TEST_ENV }}-
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps ${{ matrix.project }}
+
+      - name: Execute Playwright Tests
+        run: |
+          SUITE="${{ github.event.inputs.suite }}"
+          if [ -z "$SUITE" ]; then
+            if [ "${{ github.event.schedule }}" = "0 3 * * 0" ]; then
+              SUITE="all"
+            else
+              SUITE="smoke"
+            fi
+          fi
+
+          echo "======================================================="
+          echo " Running Playwright Tests"
+          echo " Environment : $TEST_ENV"
+          echo " Project     : ${{ matrix.project }}"
+          echo " Suite       : $SUITE"
+          echo "======================================================="
+
+          case "$SUITE" in
+            smoke)
+              npx playwright test tests/smoke/ --project=${{ matrix.project }} --reporter=html,json,github
+              ;;
+            regression)
+              npx playwright test tests/regression/ --project=${{ matrix.project }} --reporter=html,json,github
+              ;;
+            e2e)
+              npx playwright test tests/e2e/ --project=${{ matrix.project }} --reporter=html,json,github
+              ;;
+            reports)
+              npx playwright test tests/reports/ --project=${{ matrix.project }} --reporter=html,json,github
+              ;;
+            all|*)
+              npx playwright test --project=${{ matrix.project }} --reporter=html,json,github
+              ;;
+          esac
+
+      - name: Upload HTML Report Artifact
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-${{ matrix.project }}
+          path: playwright-report/
+          retention-days: 30
+
+      - name: Upload Test Results Artifact
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: test-results-${{ matrix.project }}
+          path: |
+            test-results/
+            !test-results/artifacts/
+          retention-days: 14
+
+      - name: Upload Failure Artifacts (screenshots, videos, traces)
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-artifacts-${{ matrix.project }}
+          path: test-results/artifacts/
+          retention-days: 14
+
+  # ── Deploy HTML Report to GitHub Pages ──────────────────────────────────
+  deploy-report:
+    name: 'Deploy Report to GitHub Pages'
+    needs: [test]
+    if: always() && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download Report Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report-chromium
+          path: playwright-report
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: playwright-report
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ── Slack Notification Job (Optional) ──────────────────────────────────
+  # To enable:
+  # 1. Generate an Incoming Webhook in Slack (or your company chat).
+  # 2. Add it to GitHub: Repo Settings -> Secrets and variables -> Actions -> SLACK_WEBHOOK.
+  # 3. Uncomment this job block.
+  #
+  # notify-slack:
+  #   name: 'Send Slack Notification'
+  #   needs: [test]
+  #   runs-on: ubuntu-latest
+  #   if: always()
+  #   steps:
+  #     - name: Notify Slack
+  #       uses: slackapi/slack-github-action@v2.0.0
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+  #       if: env.SLACK_WEBHOOK_URL != ''
+  #       with:
+  #         webhook: ${{ secrets.SLACK_WEBHOOK }}
+  #         webhook-type: incoming-webhook
+  #         payload: |
+  #           {
+  #             "text": "Playwright Tests Completed: Status ${{ needs.test.result }}\nEnvironment: ${{ github.event.inputs.environment || 'dev' }}\nTriggered By: ${{ github.actor }}\nRun URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+  #           }

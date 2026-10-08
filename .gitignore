@@ -1,0 +1,70 @@
+# Dependencies
+node_modules/
+
+# Test artifacts
+test-results/
+playwright-report/
+allure-results/
+allure-report/
+blob-report/
+reports/
+*.pdf
+
+# Environment variables
+.env
+.env.dev
+.env.prod
+.env.local
+.env.*.local
+!.env.*.example
+
+# Build output
+dist/
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Auth state (generated during tests)
+src/fixtures/.auth/
+storage-state*.json
+
+# Coverage
+coverage/
+
+# Debug and temporary files
+scratch/
+*.zip
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.playwright-artifacts-*/
+/*.png
+.test-entities.json
+2fa_best_practices.md
+
+# Debug text dumps and scratch artifacts
+body-dump.txt
+invoice-detail-body.txt
+invoice-menu-body.txt
+scratchpad_*.md
+scratchpad_*.spec.ts
+tests/scratchpad_*.spec.ts
+tests/debug-*.spec.ts
+walkthrough*.md
+task*.md
+implementation_plan*.md
+comprehensive_test_plan.md
+production_readiness_assessment.md
+flow-*.md
+lead-qa-automation-guide.md
